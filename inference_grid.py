@@ -4,6 +4,9 @@ import torch
 from torch import nn
 from torchvision import models, transforms
 
+# Import our custom Arduino controller
+from arduino_control import init_arduino, send_to_arduino, close_arduino
+
 # ---------------------------------------------------------
 # 1. Load Architecture & Trained Weights
 # ---------------------------------------------------------
@@ -48,7 +51,7 @@ transform = transforms.Compose(
 def classify_crop(img_crop, classifier_model, compute_device, img_transform):
     """
     Takes a cropped numpy array image, processes it through the PyTorch model,
-    and returns the predicted class index and text label.
+    and returns ONLY the predicted text label.
     """
     tensor_img = img_transform(img_crop).unsqueeze(0).to(compute_device)
     with torch.no_grad():
@@ -56,88 +59,93 @@ def classify_crop(img_crop, classifier_model, compute_device, img_transform):
         ps = torch.exp(logps)
         _, pred_class = ps.topk(1, dim=1)
 
-    prediction_idx = pred_class.item()  # 0: Biodegradable, 1: Non-Biodegradable
-    label = "Biodegradable" if prediction_idx == 0 else "Non-Biodegradable"
-    
-    return prediction_idx, label
+    # 0: Biodegradable, 1: Non-Biodegradable
+    label = "biodegradable" if pred_class.item() == 0 else "non biodegradable"
+    return label
 
 # ---------------------------------------------------------
-# 3. Initialize Live Webcam Feed
+# 3. Initialize Arduino & Live Webcam Feed
 # ---------------------------------------------------------
-cap = cv2.VideoCapture(0)
+if __name__ == "__main__":
+    # Initialize the Arduino connection before starting the camera
+    init_arduino(port="COM3")
 
-print("\n--- Live Grid Waste Classification Feed Started (Middle Cell [1,1] Only) ---")
-print("Press 'c' to scan grid cell [1,1] | Press 'q' to quit\n")
+    cap = cv2.VideoCapture(0)
 
-GRID_ROWS, GRID_COLS = 3, 3  # 3x3 grid layout
+    print("\n--- Live Grid Waste Classification Feed Started (Middle Cell [1,1] Only) ---")
+    print("Press 'c' to scan grid cell [1,1] | Press 'q' to quit\n")
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        print("Failed to grab frame from webcam.")
-        break
+    GRID_ROWS, GRID_COLS = 3, 3  # 3x3 grid layout
 
-    # Get dimensions of live frame
-    height, width, _ = frame.shape
-    display_frame = frame.copy()
-    cell_h = height // GRID_ROWS
-    cell_w = width // GRID_COLS
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame from webcam.")
+            break
 
-    # Draw faint reference grid lines on live feed window
-    for r in range(1, GRID_ROWS):
-        cv2.line(display_frame, (0, r * cell_h), (width, r * cell_h), (200, 200, 200), 1)
-    for c in range(1, GRID_COLS):
-        cv2.line(display_frame, (c * cell_w, 0), (c * cell_w, height), (200, 200, 200), 1)
+        # Get dimensions of live frame
+        height, width, _ = frame.shape
+        display_frame = frame.copy()
+        cell_h = height // GRID_ROWS
+        cell_w = width // GRID_COLS
 
-    # Show live webcam feed with grid overlay
-    cv2.imshow("Live Waste Sorting Grid", display_frame)
+        # Draw faint reference grid lines on live feed window
+        for r in range(1, GRID_ROWS):
+            cv2.line(display_frame, (0, r * cell_h), (width, r * cell_h), (200, 200, 200), 1)
+        for c in range(1, GRID_COLS):
+            cv2.line(display_frame, (c * cell_w, 0), (c * cell_w, height), (200, 200, 200), 1)
 
-    # Keyboard controls
-    key = cv2.waitKey(1) & 0xFF
-
-    if key == ord('c'):  # Press 'c' to scan only the middle [1,1] grid cell
-        print("\n[Action] Scanning middle grid cell [1,1] only...")
-        
-        r, c = 1, 1  # Middle cell coordinates
-        x1 = c * cell_w
-        y1 = r * cell_h
-        x2 = x1 + cell_w
-        y2 = y1 + cell_h
-
-        # Slice grid cell from the captured frame
-        cell_img = frame[y1:y2, x1:x2]
-
-        if cell_img.size > 0:
-            # ---------------------------------------------------------
-            # Call the user-defined function here
-            # ---------------------------------------------------------
-            prediction, label_text = classify_crop(cell_img, model, device, transform)
-            
-            print(f"Grid Cell [1,1] classified as: {label_text}")
-            
-            # Draw visual indicator on display image (Green = Bio, Red = Non-Bio)
-            box_color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
-            cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, 2)
-            cv2.putText(
-                display_frame,
-                f"[1,1] {label_text[:3]}",
-                (x1 + 10, y1 + 25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                box_color,
-                2,
-            )
-
-        print("Scan complete. Ready for next capture.\n")
-        
-        # Refresh display window to show the classification box for [1,1]
+        # Show live webcam feed with grid overlay
         cv2.imshow("Live Waste Sorting Grid", display_frame)
-        cv2.waitKey(1000)  # Pause for 1 second to view the bounding box
 
-    elif key == ord('q'):  # Press 'q' to exit
-        print("Exiting application...")
-        break
+        # Keyboard controls
+        key = cv2.waitKey(1) & 0xFF
 
-# Cleanup
-cap.release()
-cv2.destroyAllWindows()
+        if key == ord('c'):  # Press 'c' to scan only the middle [1,1] grid cell
+            print("\n[Action] Scanning middle grid cell [1,1] only...")
+            
+            r, c = 1, 1  # Middle cell coordinates
+            x1 = c * cell_w
+            y1 = r * cell_h
+            x2 = x1 + cell_w
+            y2 = y1 + cell_h
+
+            # Slice grid cell from the captured frame
+            cell_img = frame[y1:y2, x1:x2]
+
+            if cell_img.size > 0:
+                # 1. Get the classification label
+                label_text = classify_crop(cell_img, model, device, transform)
+                print(f"Grid Cell [1,1] classified as: {label_text}")
+                
+                # 2. SEND COMMAND TO ARDUINO USING IMPORTED FUNCTION
+                send_to_arduino(label_text)
+                
+                # Draw visual indicator on display image
+                box_color = (0, 255, 0) if label_text == "biodegradable" else (0, 0, 255)
+                
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, 2)
+                cv2.putText(
+                    display_frame,
+                    f"[1,1] {label_text[:3].upper()}",
+                    (x1 + 10, y1 + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    box_color,
+                    2,
+                )
+
+            print("Scan complete. Ready for next capture.\n")
+            
+            # Refresh display window and wait 1 second so you can see the box
+            cv2.imshow("Live Waste Sorting Grid", display_frame)
+            cv2.waitKey(1000)
+
+        elif key == ord('q'):  # Press 'q' to exit
+            print("Exiting application...")
+            break
+
+    # Cleanup
+    cap.release()
+    cv2.destroyAllWindows()
+    close_arduino()
